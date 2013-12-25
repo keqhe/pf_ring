@@ -1,0 +1,1 @@
+cmd_/traffic/PF_RING/drivers/DNA/igb-5.0.6-DNA/src/igb.ko := ld -r -m elf_x86_64 -T /usr/src/linux-headers-3.8.0-33-generic/scripts/module-common.lds --build-id  -o /traffic/PF_RING/drivers/DNA/igb-5.0.6-DNA/src/igb.ko /traffic/PF_RING/drivers/DNA/igb-5.0.6-DNA/src/igb.o /traffic/PF_RING/drivers/DNA/igb-5.0.6-DNA/src/igb.mod.o
