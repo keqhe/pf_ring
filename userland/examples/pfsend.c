@@ -185,7 +185,7 @@ void print_stats() {
 /* ******************************** */
 
 void my_sigalarm(int sig) {
-  print_stats();
+  //print_stats();
   alarm(1);
   signal(SIGALRM, my_sigalarm);
 }

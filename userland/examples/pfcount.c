@@ -58,7 +58,15 @@
 #define MAX_NUM_THREADS        64
 #define DEFAULT_DEVICE     "eth0"
 #define NO_ZC_BUFFER_LEN     9000
+#define bool int
+#define true 1
+#define false 0
 
+bool hash[800];
+unsigned int globaldst[800];
+unsigned int sec[800];
+unsigned int msec[800];
+ 
 pfring  *pd;
 int verbose = 0, num_threads = 1;
 pfring_stat pfringStats;
@@ -186,60 +194,36 @@ void print_stats() {
 
 /* ******************************** */
 
-void drop_packet_rule(const struct pfring_pkthdr *h) {
-  const struct pkt_parsing_info *hdr = &h->extended_hdr.parsed_pkt;
-  static int rule_id=0;
-
-  if(add_drop_rule == 1) {
-    hash_filtering_rule rule;
-
-    memset(&rule, 0, sizeof(hash_filtering_rule));
-
-    rule.rule_id = rule_id++;    
-    rule.vlan_id = hdr->vlan_id;
-    rule.proto = hdr->l3_proto;
-    rule.rule_action = dont_forward_packet_and_stop_rule_evaluation;
-    rule.host4_peer_a = hdr->ip_src.v4, rule.host4_peer_b = hdr->ip_dst.v4;
-    rule.port_peer_a = hdr->l4_src_port, rule.port_peer_b = hdr->l4_dst_port;
-    
-    if(pfring_handle_hash_filtering_rule(pd, &rule, 1 /* add_rule */) < 0)
-      fprintf(stderr, "pfring_add_hash_filtering_rule(1) failed\n");
-    else
-      printf("Added filtering rule %d\n", rule.rule_id);
-  } else {
-    filtering_rule rule;
-    int rc;
-
-    memset(&rule, 0, sizeof(rule));
-    
-    rule.rule_id = rule_id++;
-    rule.rule_action = dont_forward_packet_and_stop_rule_evaluation;
-    rule.core_fields.proto = hdr->l3_proto;
-    rule.core_fields.shost.v4 = hdr->ip_src.v4, rule.core_fields.shost_mask.v4 = 0xFFFFFFFF;
-    rule.core_fields.sport_low = rule.core_fields.sport_high = hdr->l4_src_port;
-    
-    rule.core_fields.dhost.v4 = hdr->ip_dst.v4, rule.core_fields.dhost_mask.v4 = 0xFFFFFFFF;
-    rule.core_fields.dport_low = rule.core_fields.dport_high = hdr->l4_dst_port;
-    
-    if((rc = pfring_add_filtering_rule(pd, &rule)) < 0)
-      fprintf(stderr, "pfring_add_hash_filtering_rule(2) failed\n");
-    else
-      printf("Rule %d added successfully...\n", rule.rule_id);
+void dump_stats()
+{
+  FILE *f = fopen("packet_timestamp.txt","w");
+  int i = 0;
+  while (i++ < 800)
+  {
+	printf("printing \n");
+	struct in_addr dst = {0};
+        dst.s_addr = globaldst[i];
+        fprintf(f, "dst: %s sec %ld usec %ld\n", inet_ntoa(dst), sec[i], msec[i]);	
   }
+  fclose(f);
 }
+
 
 /* ******************************** */
 
 void sigproc(int sig) {
   static int called = 0;
-
+ 
   fprintf(stderr, "Leaving...\n");
   if(called) return; else called = 1;
   do_shutdown = 1;
-
+  
+  dump_stats();
   print_stats();
   
   pfring_breakloop(pd);
+
+
 }
 
 /* ******************************** */
@@ -248,7 +232,7 @@ void my_sigalarm(int sig) {
   if(do_shutdown)
     return;
 
-  print_stats();
+  //print_stats();
   alarm(ALARM_SLEEP);
   signal(SIGALRM, my_sigalarm);
 }
@@ -306,89 +290,69 @@ static char *etheraddr_string(const u_char *ep, char *buf) {
 /* ****************************************************** */
 
 static int32_t thiszone;
+static int c = 0;
 
-void dummyProcesssPacket(const struct pfring_pkthdr *h, 
-			 const u_char *p, const u_char *user_bytes) {
+void dummyProcesssPacket(const struct pfring_pkthdr *h, const u_char *p, const u_char *user_bytes) 
+{
+
   long threadId = (long)user_bytes;
-
   numPkts[threadId]++, numBytes[threadId] += h->len+24 /* 8 Preamble + 4 CRC + 12 IFG */;
-
-#ifdef ENABLE_BPF
-  if (userspace_bpf && bpf_filter(filter.bf_insns, p, h->caplen, h->len) == 0)
-    return; /* rejected */
+  //static int c = 0;
+  // sourav
+  unsigned int sip,dip;
+  struct in_addr srcip,dstip;
+  int s;
+  uint usec;
+  uint nsec=0;
+  struct timeval cur_time;  
+  //s = h->ts.tv_sec; 
+  //usec = h->ts.tv_usec;
   
-  numPktsFiltered[threadId]++;
-#endif
-
-  if(touch_payload) {
-    volatile int __attribute__ ((unused)) i;
-    
-    i = p[12] + p[13];
-  }
-
-  if(verbose) {
-    int s;
-    uint usec;
-    uint nsec=0;
-
-    if(h->ts.tv_sec == 0) {
+  if(h->ts.tv_sec == 0) {
       memset((void*)&h->extended_hdr.parsed_pkt, 0, sizeof(struct pkt_parsing_info));
       pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 5, 1, 1);
-    }
+   }
 
-    s = (h->ts.tv_sec + thiszone) % 86400;
-
+    //s = (h->ts.tv_sec + thiszone) % 86400;
+    s = h->ts.tv_sec; 
     if(h->extended_hdr.timestamp_ns) {
-      if (pd->dna.dna_dev.mem_info.device_model != intel_igb_82580 /* other than intel_igb_82580 */)
-        s = ((h->extended_hdr.timestamp_ns / 1000000000) + thiszone) % 86400;
-      /* "else" intel_igb_82580 has 40 bit ts, using gettimeofday seconds:
-       * be careful with drifts mixing sys time and hw timestamp */
-      usec = (h->extended_hdr.timestamp_ns / 1000) % 1000000;
-      nsec = h->extended_hdr.timestamp_ns % 1000;
+      if (pd->dna.dna_dev.mem_info.device_model != intel_igb_82580)
+        s = ((h->extended_hdr.timestamp_ns / 1000000000));
+        usec = (h->extended_hdr.timestamp_ns / 1000) % 1000000;
+        nsec = h->extended_hdr.timestamp_ns % 1000;
     } else {
       usec = h->ts.tv_usec;
-    }
+   }
+ 
+   //    printf("%02d:%02d:%02d.%06u%03u ", s / 3600, (s % 3600) / 60, s % 60, usec, nsec);
 
-    printf("%02d:%02d:%02d.%06u%03u ",
-	   s / 3600, (s % 3600) / 60, s % 60,
-	   usec, nsec);
-
-    if(use_extended_pkt_header) {
-      char bigbuf[4096];
-    
-      printf("%s[if_index=%d]",
-        h->extended_hdr.rx_direction ? "[RX]" : "[TX]",
-        h->extended_hdr.if_index);
-
-      pfring_print_parsed_pkt(bigbuf, sizeof(bigbuf), p, h);
-      fputs(bigbuf, stdout);
-
-    } else {
-      char buf1[32], buf2[32];
-      struct ether_header *ehdr = (struct ether_header *) p;
-
-      printf("[%s -> %s][eth_type=0x%04X][caplen=%d][len=%d] (use -m for details)\n",
-	     etheraddr_string(ehdr->ether_shost, buf1),
-	     etheraddr_string(ehdr->ether_dhost, buf2), 
-	     ntohs(ehdr->ether_type),
-	     h->caplen, h->len);
-    }
-  }
+   //char buf1[32], buf2[32];
+   //struct ether_header *ehdr = (struct ether_header *) p;
+   memcpy((unsigned char*)&dip,p+30,4);
+   //memcpy((unsigned char*)&sip,p+26,4);
+   //srcip.s_addr = sip;
+   dstip.s_addr = dip;
+   if (hash[ntohl(dip)%800])
+   {
+//	printf("Already recorded DIP \n");
+	return;
+   }
+   //gettimeofday(&cur_time, NULL);
+   hash[ntohl(dip)%800] = true;
+   //printf(": [%s -> %s] \n", inet_ntoa(srcip),inet_ntoa(dstip));
+   globaldst[ntohl(dip)%800] = dip;
+   sec[ntohl(dip)%800] = s; //cur_time.tv_sec;//s;
+   msec[ntohl(dip)%800] = usec;//cur_time.tv_usec; //usec;
+   c++;
+   //if (c % 50 == 0) {
+   //	printf("pfcount, DEBUG: %d\n", c);
+   //}
+   if (c >=511)
+   {
+	printf("pfcount, DEBUG: %d\n", c);
+	dump_stats();
+   }
   
-  if(verbose == 2) {
-      int i;
-
-      for(i = 0; i < h->caplen; i++)
-        printf("%02X ", p[i]);
-      printf("\n");
-  }
-
-  if(unlikely(add_drop_rule)) {
-    if(h->ts.tv_sec == 0)
-      pfring_parse_pkt((u_char*)p, (struct pfring_pkthdr*)h, 4, 0, 1);
-
-    drop_packet_rule(h);
-  }
 }
 
 /* *************************************** */
@@ -434,25 +398,25 @@ void printHelp(void) {
 	 );
   printf("-n <threads>    Number of polling threads (default %d)\n", num_threads);
   printf("-f <filter>     [BPF filter]\n"); 
-  printf("-c <cluster id> cluster id\n");
-  printf("-e <direction>  0=RX+TX, 1=RX only, 2=TX only\n");
+  //printf("-c <cluster id> cluster id\n");
+  //printf("-e <direction>  0=RX+TX, 1=RX only, 2=TX only\n");
   printf("-l <len>        Capture length\n");
   printf("-g <core_id>    Bind this app to a core\n");
   printf("-d <device>     Device on which incoming packets are copied (e.g. userspace:usr0 or dna1)\n");
-  printf("-w <watermark>  Watermark\n");
+  //printf("-w <watermark>  Watermark\n");
   printf("-p <poll wait>  Poll wait (msec)\n");
   printf("-b <cpu %%>      CPU pergentage priority (0-99)\n");
-  printf("-a              Active packet wait\n");
-  printf("-m              Long packet header (with PF_RING extensions)\n");
-  printf("-r              Rehash RSS packets\n");
+  //printf("-a              Active packet wait\n");
+  //printf("-m              Long packet header (with PF_RING extensions)\n");
+  //printf("-r              Rehash RSS packets\n");
   printf("-s              Enable hw timestamping\n");
-  printf("-S              Do not strip hw timestamps (if present)\n");
-  printf("-t              Touch payload (for force packet load on cache)\n");
+  //printf("-S              Do not strip hw timestamps (if present)\n");
+  //printf("-t              Touch payload (for force packet load on cache)\n");
 #ifdef ENABLE_QAT_PM
-  printf("-x <string>     Search string on payload. You can specify this option multiple times.\n");
+  //printf("-x <string>     Search string on payload. You can specify this option multiple times.\n");
 #endif
-  printf("-u <1|2>        For each incoming packet add a drop rule (1=hash, 2=wildcard rule)\n");
-  printf("-v <mode>       Verbose [1: verbose, 2: very verbose (print packet payload)]\n");
+  //printf("-u <1|2>        For each incoming packet add a drop rule (1=hash, 2=wildcard rule)\n");
+  //printf("-v <mode>       Verbose [1: verbose, 2: very verbose (print packet payload)]\n");
   exit(0);
 }
 
@@ -491,27 +455,12 @@ void* packet_consumer_thread(void* _id) {
       buffer[2] = 0x97;
       pfring_send(pd, buffer, hdr.caplen);
 #endif
-    } else {
-      if(wait_for_packet == 0) sched_yield();
     } 
-
-    if(0) {
-      struct simple_stats {
-	u_int64_t num_pkts, num_bytes;
-      };
-      struct simple_stats stats;
-
-      len = sizeof(stats);
-      rc = pfring_get_filtering_rule_stats(pd, 5, (char*)&stats, &len);
-      if(rc < 0)
-	fprintf(stderr, "pfring_get_filtering_rule_stats() failed [rc=%d]\n", rc);
-      else {
-	printf("[Pkts=%u][Bytes=%u]\n",
-	       (unsigned int)stats.num_pkts,
-	       (unsigned int)stats.num_bytes);
-      }
+    else {
+      if(wait_for_packet == 0) sched_yield();
+      } 
     }
-  }
+  
 
   return(NULL);
 }
@@ -522,10 +471,7 @@ void* packet_consumer_thread(void* _id) {
 
 int main(int argc, char* argv[]) {
   char *device = NULL, c, buf[32], path[256] = { 0 }, *reflector_device = NULL;
-#ifdef ENABLE_QAT_PM
-  char *to_search[MAX_NUM_STRINGS] = { NULL };
-  u_int num_strings_to_search = 0;
-#endif
+
   u_char mac_address[6] = { 0 };
   int promisc, snaplen = DEFAULT_SNAPLEN, rc;
   u_int clusterId = 0;
@@ -537,74 +483,26 @@ int main(int argc, char* argv[]) {
 #ifdef ENABLE_BPF
   char *bpfFilter = NULL;
 #endif
-
-#if 0
-  struct sched_param schedparam;
-
-  /* mlockall(MCL_CURRENT|MCL_FUTURE); */
-
-  schedparam.sched_priority = 50;
-  if(sched_setscheduler(0, SCHED_FIFO, &schedparam) == -1) {
-    printf("error while setting the scheduler, errno=%i\n", errno);
-    exit(1);
-  }
-
-#undef TEST_PROCESSOR_AFFINITY
-#ifdef TEST_PROCESSOR_AFFINITY
-  {
-    unsigned long new_mask = 1;
-    unsigned int len = sizeof(new_mask);
-    unsigned long cur_mask;
-    pid_t p = 0; /* current process */
-    int ret;
-
-    ret = sched_getaffinity(p, len, NULL);
-    printf(" sched_getaffinity = %d, len = %u\n", ret, len);
-
-    ret = sched_getaffinity(p, len, &cur_mask);
-    printf(" sched_getaffinity = %d, cur_mask = %08lx\n", ret, cur_mask);
-
-    ret = sched_setaffinity(p, len, &new_mask);
-    printf(" sched_setaffinity = %d, new_mask = %08lx\n", ret, new_mask);
-
-    ret = sched_getaffinity(p, len, &cur_mask);
-    printf(" sched_getaffinity = %d, cur_mask = %08lx\n", ret, cur_mask);
-  }
-#endif
-#endif
-
+  int i = 0;
   startTime.tv_sec = 0;
   thiszone = gmt2local(0);
 
-  while((c = getopt(argc,argv,"hi:c:d:l:v:ae:n:w:p:b:rg:u:mtsS"
-#ifdef ENABLE_QAT_PM
-		    "x:"
-#endif
-#ifdef ENABLE_BPF
-		    "f:"
-#endif
-        )) != '?') {
+  for (;i<800;i++)
+  {
+      hash[i] = false; globaldst[i] = 0; sec[i] = 0; msec[i] = 0;
+  }
+
+  while((c = getopt(argc,argv,"hi:c:d:l:v:ae:n:w:p:b:rg:u:mtsS")) != '?') {
     if((c == 255) || (c == -1)) break;
 
     switch(c) {
-    case 'h':
-      printHelp();
-      return(0);
-      break;
     case 'a':
       wait_for_packet = 0;
       break;
-    case 'e':
-      switch(atoi(optarg)) {
-      case rx_and_tx_direction:
-      case rx_only_direction:
-      case tx_only_direction:
-	direction = atoi(optarg);
-	break;
-      }
-      break;
-    case 'c':
-      clusterId = atoi(optarg);
+    
+case 'h':
+      printHelp();
+      return(0);
       break;
     case 'd':
       reflector_device = strdup(optarg);
@@ -618,22 +516,11 @@ int main(int argc, char* argv[]) {
     case 'n':
       num_threads = atoi(optarg);
       break;
-    case 'v':
-      if(optarg[0] == '1')
-	verbose = 1;
-      else if(optarg[0] == '2')
-	verbose = 2;
-      else
-	printHelp();
-      break;
 #ifdef ENABLE_BPF
     case 'f':
       bpfFilter = strdup(optarg);
       break;     
 #endif
-    case 'w':
-      watermark = atoi(optarg);
-      break;
     case 'b':
       cpu_percentage = atoi(optarg);
       break;
@@ -643,45 +530,12 @@ int main(int argc, char* argv[]) {
     case 'p':
       poll_duration = atoi(optarg);
       break;
-    case 'r':
-      rehash_rss = 1;
-      break;
-    case 't':
-      touch_payload = 1;
-      break;
-    case 's':
-      enable_hw_timestamp = 1;
-      break;
-    case 'S':
-      dont_strip_timestamps = 1;
-      break;
     case 'g':
       bind_core = atoi(optarg);
       break;
-    case 'u':
-      switch(add_drop_rule = atoi(optarg)) {
-      case 1:
-	printf("Adding hash filtering rules\n");
-	break;
-
-      default:
-	printf("Adding wildcard filtering rules\n");
-	add_drop_rule = 2;
-	break;
-      }
-
-#ifdef ENABLE_QAT_PM
-    case 'x':
-      if(num_strings_to_search >= MAX_NUM_STRINGS) {
-	printf("Too many strings specified (-x): maximum %u\n", MAX_NUM_STRINGS);
-      } else
-	to_search[num_strings_to_search++] = strdup(optarg);
-      break;
-#endif
     }
   }
   
-  if(verbose) watermark = 1;
   if(device == NULL) device = DEFAULT_DEVICE;
   if(num_threads > MAX_NUM_THREADS) num_threads = MAX_NUM_THREADS;
 
@@ -776,20 +630,6 @@ int main(int argc, char* argv[]) {
   }
 #endif
 
-#ifdef ENABLE_QAT_PM
-  if(num_strings_to_search > 0) {
-    int i;
-
-    for(i=0; i<num_strings_to_search; i++) {
-      rc = pfring_search_payload(pd, to_search[i]);
-      if(rc < 0)
-	printf("pfring_search_payload() returned %d\n", rc);
-      else
-	printf("Successfully added string to search '%s'\n", to_search[i]);  
-    }
-  }
-#endif
-
   if(clusterId > 0) {
     rc = pfring_set_cluster(pd, clusterId, cluster_round_robin);
     printf("pfring_set_cluster returned %d\n", rc);
@@ -801,11 +641,6 @@ int main(int argc, char* argv[]) {
   if((rc = pfring_set_socket_mode(pd, recv_only_mode)) != 0)
     fprintf(stderr, "pfring_set_socket_mode returned [rc=%d]\n", rc);
 
-  if(watermark > 0) {
-    if((rc = pfring_set_poll_watermark(pd, watermark)) != 0)
-      fprintf(stderr, "pfring_set_poll_watermark returned [rc=%d][watermark=%d]\n", rc, watermark);
-  }
-
   if(reflector_device != NULL) {
     rc = pfring_set_reflector_device(pd, reflector_device);
 
@@ -815,9 +650,6 @@ int main(int argc, char* argv[]) {
       fprintf(stderr, "pfring_set_reflector_device(%s) failed [rc: %d]\n", reflector_device, rc);
   }
 
-  if(rehash_rss)
-    pfring_enable_rss_rehash(pd);
-
   if(poll_duration > 0)
     pfring_set_poll_duration(pd, poll_duration);
 
@@ -825,114 +657,11 @@ int main(int argc, char* argv[]) {
   signal(SIGTERM, sigproc);
   signal(SIGINT, sigproc);
 
-  if(!verbose) {
+/*  if(!verbose) {
     signal(SIGALRM, my_sigalarm);
     alarm(ALARM_SLEEP);
   }
-
-  if(0) {
-    filtering_rule rule;
-    int rc;
-
-#define DUMMY_PLUGIN_ID   1
-
-    memset(&rule, 0, sizeof(rule));
-
-    rule.rule_id = 5;
-    rule.rule_action = forward_packet_and_stop_rule_evaluation;
-    rule.core_fields.proto = 6 /* tcp */;
-    // rule.plugin_action.plugin_id = DUMMY_PLUGIN_ID; /* Dummy plugin */
-    // rule.extended_fields.filter_plugin_id = DUMMY_PLUGIN_ID; /* Enable packet parsing/filtering */
-
-    if((rc = pfring_add_filtering_rule(pd, &rule)) < 0)
-      fprintf(stderr, "pfring_add_filtering_rule(2) failed\n");
-    else
-      printf("Rule added successfully...\n");
-  }
-
-  if(0) {
-    filtering_rule rule;
-
-    char *sgsn = "1.2.3.4";
-    char *ggsn = "1.2.3.5";
-
-    /* ************************************* */
-
-    memset(&rule, 0, sizeof(rule));
-    rule.rule_id = 1;
-    rule.rule_action = forward_packet_and_stop_rule_evaluation;
-    rule.core_fields.proto = 17 /* UDP */;
-
-    rule.core_fields.shost.v4 = ntohl(inet_addr(sgsn)),rule.core_fields.shost_mask.v4 = 0xFFFFFFFF;
-    rule.core_fields.dhost.v4 = ntohl(inet_addr(ggsn)), rule.core_fields.dhost_mask.v4 = 0xFFFFFFFF;
-    
-    rule.extended_fields.tunnel.tunnel_id = 0x0000a2b6;
-    
-    if((rc = pfring_add_filtering_rule(pd, &rule)) < 0)
-      fprintf(stderr, "pfring_add_filtering_rule(id=%d) failed: rc=%d\n", rule.rule_id, rc);
-    else
-      printf("Rule %d added successfully...\n", rule.rule_id );
-
-    /* ************************************* */
-
-    memset(&rule, 0, sizeof(rule));
-
-    rule.rule_id = 2;
-    rule.rule_action = forward_packet_and_stop_rule_evaluation;
-    rule.core_fields.proto = 17 /* UDP */;
-
-    rule.core_fields.shost.v4 = ntohl(inet_addr(ggsn)), rule.core_fields.dhost_mask.v4 = 0xFFFFFFFF;
-    rule.core_fields.dhost.v4 = ntohl(inet_addr(sgsn)), rule.core_fields.shost_mask.v4 = 0xFFFFFFFF;
-    
-    rule.extended_fields.tunnel.tunnel_id = 0x776C0000;
-    if((rc = pfring_add_filtering_rule(pd, &rule)) < 0)
-      fprintf(stderr, "pfring_add_filtering_rule(id=%d) failed: rc=%d\n", rule.rule_id, rc);
-    else
-      printf("Rule %d added successfully...\n", rule.rule_id );
-    
-    /* ************************************** */
-
-    /* Signaling (Up) */
-
-    memset(&rule, 0, sizeof(rule));
-
-    rule.rule_id = 3;
-    rule.rule_action = forward_packet_and_stop_rule_evaluation;
-    rule.core_fields.proto = 17 /* UDP */;
-    rule.core_fields.sport_low = rule.core_fields.sport_high = 2123;
-    rule.extended_fields.tunnel.tunnel_id = NO_TUNNEL_ID; /* Ignore the tunnel */
-
-    if((rc = pfring_add_filtering_rule(pd, &rule)) < 0)
-      fprintf(stderr, "pfring_add_filtering_rule(id=%d) failed: rc=%d\n", rule.rule_id, rc);
-    else
-      printf("Rule %d added successfully...\n", rule.rule_id );
-
-    memset(&rule, 0, sizeof(rule));
-
-    /* ************************************** */
-
-    /* Signaling (Down) */
-
-    memset(&rule, 0, sizeof(rule));
-
-    rule.rule_id = 4;
-    rule.rule_action = forward_packet_and_stop_rule_evaluation;
-    rule.core_fields.proto = 17 /* UDP */;
-    rule.core_fields.dport_low = rule.core_fields.dport_high = 2123;
-    rule.extended_fields.tunnel.tunnel_id = NO_TUNNEL_ID; /* Ignore the tunnel */
-
-    if((rc = pfring_add_filtering_rule(pd, &rule)) < 0)
-      fprintf(stderr, "pfring_add_filtering_rule(id=%d) failed: rc=%d\n", rule.rule_id, rc);
-    else
-      printf("Rule %d added successfully...\n", rule.rule_id );
-
-    memset(&rule, 0, sizeof(rule));
-
-    /* ************************************** */
-
-    pfring_toggle_filtering_policy(pd, 0); /* Default to drop */
-  }
-
+*/
   pfring_set_application_stats(pd, "Statistics not yet computed: please try again...");
   if(pfring_get_appl_stats_file_name(pd, path, sizeof(path)) != NULL)
     fprintf(stderr, "Dumping statistics on %s\n", path);
